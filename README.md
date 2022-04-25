@@ -5,4 +5,4 @@ I’ve read (and reread) all the posts on this topic on the OpenHAB forum and my
 
 I will update the documentation as soon as I've learned and implemented or improved, but am doing this on my spare time so don't expect to much to fast.
 
-## Latest version can be found [here](https://github.com/alfpf/NSPanel-setup/blob/main/OpenHAB3%20and%20Sonoff%20NSPanel%20v2.6.pdf)
+## Latest version can be found [here](https://github.com/alfpf/NSPanel-setup/blob/main/OpenHAB3%20and%20Sonoff%20NSPanel%20v2.8.pdf)
