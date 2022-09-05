@@ -1,0 +1,416 @@
+/*Imports and global definitions */
+import org.slf4j.LoggerFactory
+def logger = LoggerFactory.getLogger("org.openhab.core.automation.nspanel")
+
+/*----------------------------------------------------------------
+ * Custom Configurations
+ * Note1! Replace MQTT channel with that of your mosquitto brooker
+ * Note2! Set TOPIC to the value of your NSPanel
+ *        (This is where the JSON string built by this script is posted)
+ *----------------------------------------------------------------*/
+def mqtt = actions.get("mqtt","mqtt:broker:mosquitto_sweden3")
+def TOPIC = "cmnd/nspanel_7DD7FC/nxpanel"
+
+/* Definition of Panel types (page types) for available layouts
+ * NOTE! This is not the same as the PanelID (id) parameter but instead one of
+ * 15 predefined “panel designs”
+ */
+def PAGE_HOME            = 1
+def PAGE_2_BUTTON        = 2
+def PAGE_3_BUTTON        = 3
+def PAGE_4_BUTTON        = 4
+def PAGE_6_BUTTON        = 5
+def PAGE_8_BUTTON        = 6
+def PAGE_DIMMER          = 7
+def PAGE_DIMMER_COLOR    = 8
+def PAGE_THERMOSTAT      = 9
+def PAGE_ALERT_1         = 10
+def PAGE_ALERT_2         = 11
+def PAGE_ALARM           = 12
+def PAGE_MEDIA           = 13
+def PAGE_PLAYLIST        = 14
+def PAGE_STATUS          = 15
+
+/* Definition of button types */
+def BUTTON_UNUSED        = 0
+def BUTTON_TOGGLE        = 1
+def BUTTON_PUSH          = 2
+def BUTTON_DIMMER        = 3
+def BUTTON_DIMMER_COLOR  = 4
+def BUTTON_PAGE          = 10
+
+/* Definition of icon types */
+def ICON_BLANK           = 0 
+def ICON_BULB            = 1 
+def ICON_DIMMER          = 2 
+def ICON_DIMMER_COLOR    = 3
+def ICON_VACUUM          = 4 
+def ICON_BED             = 5 
+def ICON_HOUSE           = 6 
+def ICON_SOFA            = 7 
+def ICON_BELL            = 8 
+def ICON_HEAT            = 9
+def ICON_CURTAINS        = 10 
+def ICON_MUSIC           = 11
+def ICON_BINARY          = 12 
+def ICON_FAN             = 13
+def ICON_SWITCH          = 14
+def ICON_TALK            = 15
+def ICON_INFO            = 16
+
+def NONE                 = 0
+
+// Get the JSON string when event has triggered
+def str = event.getEvent()
+
+logger.info("NXPanel Trigger - Script triggerd by event: <"+str+">")
+
+// Return if the string {"page": is not found in the JSON
+//This basically means that all other events posted on this channel are dropped
+if (str.indexOf('{"page":')!=0) {
+  logger.info("NXPanel Trigger - Not a page event, returning...")
+  return
+}
+
+/*------------------------------------
+ * Utility functions - start
+ *------------------------------------*/
+
+/* Build a JSON string segment for a button, parameters are:
+ *    bid   – Button id (bid==1 is the first button on a page)
+ *    label – Label under the button 
+ *    type  – button type
+ *    icon  – Button icon to use [or null]
+ *    state – Button state [or null]
+ *    next  – Panel ID of next panel [or null]
+ */
+def makeButton(bid,label,type,icon=null,state=null,next=null) {
+  var str = ""<<((bid==1)?"":",")
+  str<<'{"bid":'<<bid<<',"label":"'<<label<<'","type":'<<type
+  if (next!=null) {
+    str<<',"next":'<<next
+  }
+  if (state!=null) {
+    str<<',"state":'<<state
+  }
+  if (icon!=null) {
+    str<<',"icon":'<<icon
+  }
+  str<<'}'
+  return str
+}
+
+/* Build a JSON string segment for a button page, parameters are:
+ *    pid   – Panel id
+ *    name  – JSON with all buttons on this panel
+ *    format – Page type 
+ */
+def makePage(pid,name,format) {
+  var str = new StringBuilder('{"refresh":')
+  str<<'{"pid":'<<pid<<',"name":"'<<name<<'","format":'<<format<<',buttons:['
+  //str<<'{"pid":'<<pid<<',"name":"'<<name<<'",'
+  return str
+}
+
+/* Build a JSON string segment for a dimmer page, parameters are:
+ *    pid   – Panel id
+ *    name  – JSON with all buttons on this panel
+ */
+def makePage2(pid,name) {
+  var str = new StringBuilder('{"refresh":')
+  str<<'{"pid":'<<pid<<',"name":"'<<name<<'",'
+  return str
+}
+
+/* Build a JSON string header for a sync for a page
+ *    pid   – Panel id
+ */
+def makeEmptySync(pid) {
+  var str = new StringBuilder('{"sync":')
+  str<<'{"pid":'<<pid<<'}}'
+  return str
+}
+
+/* Build a JSON string header for a page refresh (just update one page), parameters are:
+ *    pid   – Panel id
+ */
+def makeEmptyRefresh(pid) {
+  var str = new StringBuilder('{"refresh":')
+  str<<'{"pid":'<<pid<<'}}'
+  return str
+}
+
+/* Build a JSON string for a button state sync (just update state of button)
+ *    pid   – Panel id
+ *    bid   – Button id 
+ *    state – Button state
+ */
+def makeSyncButtonStart(pid,bid,state) {
+  var str = new StringBuilder('{"sync":')
+  str<<'{"pid":'<<pid
+  str<<',buttons:[{"bid":'<<bid<<',"state":'<<state<<'}'
+  return str
+}
+
+/* Build a JSON string for a button state sync (just update state of button)
+ *    bid   – Button id 
+ *    state – Button state
+ */
+def addSyncButton(bid,state) {
+  var str = ',{"bid":'<<bid<<',"state":'<<state<<'}'
+  return str
+}
+
+/*----------------------------
+ * Utility functions - end
+ *-----------------------------*/
+
+/*
+ * Get data from the page message
+ * (would be good to use JsonSluper here but currently can't access)
+ */
+logger.info("NXPanel Trigger - Analyzing id and format..")
+
+// str contains the JSON string.
+// Extract the panel id (var id) and the panel type (var format) from str
+var i = str.indexOf("\"pid\"")
+var i2 = str.indexOf(",",i+7)
+var id = str.substring(i+7,i2)
+
+i = str.indexOf("\"format\"")
+i2 = str.indexOf(",",i+10)
+var format = str.substring(i+10,i2)
+
+// check if a full refresh or just a status update
+var refresh = str.indexOf("refresh")>0
+// Uncomment if you want to do a full refresh every time
+//refresh = 1 > 0
+
+logger.info("NXPanel Trigger - id="+id+", format="+format)
+
+// Empty variable to contain the return JSON
+var json
+
+// This is YOUR design. Define the panels and their corresponding panel id 
+// (This basically maps all the panels you have designed)
+def PANEL_MAIN          = 10
+def PANEL_BEDROOM_1     = 11
+def PANEL_BEDROOM_2     = 12
+def PANEL_LOUNGE        = 13
+def PANEL_CABIN         = 14
+def PANEL_CABIN_THERMO  = 15
+def PANEL_CABIN_LIGHTS  = 16
+def PANEL_LOUNGE_FAN    = 17
+def PANEL_BEDSIDE_LIGHT = 18
+def PANEL_STATUS        = 19
+def PANEL_MUSIC         = 20
+
+// Just send a message to the log that your received a post from NSPanel
+logger.info("NXPanel Trigger - Updating page ... "+id)
+
+// Check wich of your panels NSPanel wants you to process
+switch (id as int) {  
+  
+  case PANEL_MAIN :
+    logger.info("NXPanel Trigger - PANEL_MAIN")
+    // set these from your own items
+    //movie_state = 1
+    hall_state = ir.getItem("P10B1_Hall").state==ON?1:0
+    //lounge_state = 1
+    lounge_state = ir.getItem("P10B2_Lounge").state==ON?1:0
+  
+    if (refresh) {
+      // NSPanel has asked you to render the entire panel 
+      // Define the layout of your panel
+      json = makePage(id,'Home - Main Panel',format)
+      json<<makeButton(1,"Hall",BUTTON_TOGGLE,ICON_BULB,hall_state)
+      json<<makeButton(2,"Lounge",BUTTON_TOGGLE,ICON_BULB,lounge_state)
+      json<<makeButton(3,"Bed 1",BUTTON_PUSH,ICON_BULB)
+      json<<makeButton(4,"Heating",BUTTON_PAGE,ICON_HEAT,PAGE_THERMOSTAT,PANEL_CABIN_THERMO)
+      json<<makeButton(5,"Lounge",BUTTON_PAGE,ICON_SOFA,PAGE_6_BUTTON,PANEL_LOUNGE)
+      json<<makeButton(6,"Study",BUTTON_PAGE,ICON_SOFA,PAGE_4_BUTTON,PANEL_BEDROOM_1)
+      json<<makeButton(7,"Cabin",BUTTON_PAGE,ICON_HOUSE,PAGE_3_BUTTON,PANEL_CABIN)
+      json<<makeButton(8,"Garage",BUTTON_PAGE,ICON_HOUSE,PAGE_2_BUTTON,PANEL_BEDROOM_2)
+      json<<"]}}"
+    } else {
+      // NSPanel has asked you to just update the states of your buttons on this panel
+      json = makeSyncButtonStart(id,1,hall_state)
+      json<<addSyncButton(2,lounge_state)
+      json<<"]}}"
+    }
+    logger.info("Panel: 10, Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_BEDROOM_1 :
+    logger.info("NXPanel Trigger - PANEL_BEDROOM_1")
+    // set these from your own items
+    cieling_state = 0
+    //cieling_state = ir.getItem("P11B1_Ceiling").state==ON?1:0
+    bedside_state = 1
+    //bedside_state = ir.getItem("P18_Bedside_Light").state==ON?1:0
+    curtains_state = 1
+    if (refresh) {
+      // NSPanel has asked you to render the entire panel 
+      // Define the layout of your panel
+      json = makePage(id,'Master Bedroom',format)
+      json<<makeButton(1,"Cieling",BUTTON_TOGGLE,ICON_BULB,cieling_state)
+      json<<makeButton(2,"Bedside",BUTTON_DIMMER,ICON_DIMMER,bedside_state,PANEL_BEDSIDE_LIGHT)
+      json<<makeButton(3,"Music",BUTTON_PAGE,ICON_MUSIC,PAGE_MEDIA,PANEL_MUSIC)
+      json<<makeButton(4,"Curtains",BUTTON_TOGGLE,ICON_CURTAINS,curtains_state)
+      json<<"]}}"
+    } else {
+      // NSPanel has asked you to just update the states of your buttons on this panel
+      json = makeSyncButtonStart(id,1,cieling_state)
+      json<<addSyncButton(2,bedside_state)
+      json<<addSyncButton(4,curtains_state)
+      json<<"]}}"
+    }
+    logger.info("Panel: "+PANEL_BEDROOM_1+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_BEDROOM_2 :
+    logger.info("NXPanel Trigger - PANEL_BEDROOM_2")
+    // set these from your own items
+    xbox_state = 1
+    fan_state = 1
+    if (refresh) {
+      // NSPanel has asked you to render the entire panel 
+      // Define the layout of your panel
+      json = makePage(id,'Teds bedroom',format)
+      json<<makeButton(1,"Xbox",BUTTON_TOGGLE,ICON_SWITCH,xbox_state)
+      json<<makeButton(2,"Fan",BUTTON_DIMMER,ICON_FAN,fan_state,PANEL_LOUNGE_FAN)
+      json<<"]}}"
+    } else {
+      // NSPanel has asked you to just update the states of your buttons on this panel
+      json = makeSyncButtonStart(id,1,xbox_state)
+      json<<addSyncButton(2,fan_state)
+      json<<"]}}"
+    }
+    logger.info("Panel: "+PANEL_BEDROOM_2+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_LOUNGE :
+    // set these from your own items
+    cieling_state = 1
+    floor_state = 1
+    mood_state = 1
+    curtains_state = 0
+    if (refresh) {
+      // NSPanel has asked you to render the entire panel 
+      // Define the layout of your panel
+      json = makePage(id,'Lounge',format)
+      json<<makeButton(1,"Cieling",BUTTON_TOGGLE,ICON_BULB,cieling_state)
+      json<<makeButton(2,"Floor",BUTTON_TOGGLE,ICON_BULB,floor_state)
+      json<<makeButton(3,"Mood",BUTTON_DIMMER_COLOR,ICON_DIMMER_COLOR,mood_state,PANEL_CABIN_LIGHTS)
+      json<<makeButton(4,"Sonos",BUTTON_PAGE,ICON_MUSIC,PAGE_MEDIA,PANEL_MUSIC)
+      json<<makeButton(5,"Heating",BUTTON_PAGE,ICON_HEAT,PAGE_THERMOSTAT,PANEL_CABIN_THERMO)
+      json<<makeButton(6,"Curtains",BUTTON_TOGGLE,ICON_CURTAINS,curtains_state)
+      json<<"]}}"
+    } else {
+      // NSPanel has asked you to just update the states of your buttons on this panel
+      json = makeSyncButtonStart(id,1,cieling_state)
+      json<<addSyncButton(2,floor_state)
+      json<<addSyncButton(3,mood_state)
+      json<<addSyncButton(6,curtains_state)
+      json<<"]}}"
+    }
+    logger.info("Panel: "+PANEL_LOUNGE+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_CABIN :
+    logger.info("NXPanel Trigger - PANEL_CABIN")
+    // set these from your own items
+    front_state = 1
+    if (refresh) {
+      // NSPanel has asked you to render the entire panel 
+      // Define the layout of your panel
+      json = makePage(id,'Hall Lightning',format)
+      json<<makeButton(1,"Front",BUTTON_TOGGLE,ICON_BULB,front_state)
+      json<<makeButton(2,"Alarm",BUTTON_PAGE,ICON_BELL,PAGE_ALARM,NONE) 
+      json<<makeButton(3,"Status",BUTTON_PAGE,ICON_INFO,PAGE_STATUS,PANEL_STATUS)
+      json<<"]}}"
+    } else {
+      // NSPanel has asked you to just update the states of your buttons on this panel
+      json = makeSyncButtonStart(id,1,front_state)
+      json<<"]}}"
+    }
+    logger.info("Panel: "+PANEL_CABIN+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_CABIN_THERMO :
+    // set these from your own items
+    var heater = 1
+    var auto = 0
+    var temp = 0
+    var set = 14
+    json = makePage2(id,'Cabin')
+    json<<'"therm":{'
+    json<<'"set":'<<set<<',"temp":'<<temp<<',"heat":'<<heater<<',"state":'<<auto<<'"'
+    json<<"}}"
+    logger.info("Panel: "+PANEL_CABIN_THERMO+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_CABIN_LIGHTS :
+    // Color Dimmer Panel: This panel needs to refresh each time it's called
+  
+    // set these from your own items
+    bedroom_mood_state = 1
+    bedroom_mood_hsbcolor "10,100,50"
+    json = makePage2(id,'Bedroom mood light')
+    json<<'"power":'<<bedroom_mood_state<<',"hsbcolor":'<<'"10,100,50"'
+    json<<"}}"
+    logger.info("Panel: "+PANEL_CABIN_LIGHTS+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_LOUNGE_FAN :
+    // Dimmer Panel: This panel needs to refresh each time it's called
+
+    // set these from your own items
+    fan_state = ON
+    fan_setting = 3
+    json = makePage2(id,'Lounge Fan')
+    json<<'"power":'<<fan_state<<',"min":'<<1<<',"max":'<<4<<',"icon":'<<ICON_FAN<<',"dimmer":'<<fan_setting
+    json<<"}}"
+    logger.info("Panel: "+PANEL_LOUNGE_FAN+", Sending JSON:"+json.toString()) 
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_BEDSIDE_LIGHT :
+    // Dimmer Panel: This panel needs to refresh each time it's called
+    logger.info("NXPanel Trigger - Processing PANEL_KÖKSBORD_DIMMER..")
+    // set these from your own items
+    bedside_state = ir.getItem("P18_Bedside_Light").state==ON?1:0
+    bedside_dimlevel = ir.getItem("P18_Bedside_Light_Dimlevel").state
+    // Build JSON
+    json = makePage2(id,'Bedside Light')
+    json<<'"power":'<<bedside_state<<',"dimmer":'<<bedside_dimlevel
+    json<<"}}"
+    logger.info("Panel: "+PANEL_BEDSIDE_LIGHT+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_STATUS :
+    json = makePage(id,'System Status',format)
+    json<<'"status":['
+    json<<'{"id":'<<1<<',"text":'<<'"Gate":'<<',"value":'<<'"Open"'<<',"color":'<<2<<'}'
+    json<<','
+    json<<'{"id":'<<2<<',"text":'<<'"Window":'<<',"value":'<<',"Shut"'<<',"color":'<<3<<'}'
+    json<<','
+    json<<'{"id":'<<5<<',"text":'<<'"Room Temp":'<<',"value":'<<',"20°C"'<<'}'
+    json<<']}}'
+    logger.info("Panel: "+PANEL_STATUS+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break
+  case PANEL_MUSIC :
+    json = makePage(id,'Sonos Player',format)
+    // set these from your own items
+    json<<'"artist":'<<'"New Order"'<<',"album":'<<'"Movement"'<<',"track":'<<'"Power Play"'<<',"volume":'<<70
+    json<<"}}"
+    logger.info("Panel: "+PANEL_MUSIC+", Sending JSON:"+json.toString())
+    mqtt.publishMQTT(TOPIC, json.toString())
+    break    
+  default :
+    logger.info("unknown page!")
+    break
+
+}
+
+logger.info("rule done")
